@@ -1,6 +1,6 @@
 Name:		kpatch
 Version:	0.6.1
-Release:	4%{?dist}
+Release:	5%{?dist}
 Summary:	Dynamic kernel patch manager
 
 Group:		System Environment/Kernel
@@ -10,6 +10,7 @@ Source0:	https://github.com/dynup/kpatch/archive/v%{version}.tar.gz
 Patch0:		0001-contrib-disable-upstart-kpatch.conf-install.patch
 Patch1:		0002-contrib-service-don-t-unload-modules-on-stop.patch
 Patch2:		0003-kpatch-script-don-t-fail-if-module-already-loaded-en.patch
+Patch3:		0004-kpatch-clarify-unload-unsupport.patch
 
 Requires:	bash kmod binutils
 
@@ -27,6 +28,7 @@ patch the kernel without rebooting.
 %patch0 -p1
 %patch1 -p1
 %patch2 -p1
+%patch3 -p1
 
 
 %build
@@ -47,6 +49,9 @@ rm -f %{buildroot}/usr/share/man/man1/kpatch-build.1.gz
 
 
 %changelog
+* Fri Sep 6 2019 Joe Lawrence <joe.lawrence@redhat.com> 0.6.1-5
+- kpatch: clarify that "kpatch unload" isn't supported (rhbz#1749299)
+
 * Sun Jun 23 2019 Joe Lawrence <joe.lawrence@redhat.com> 0.6.1-3
 - Rebuild with correct RHEL-7.7 bugzilla number (rhbz#1719309)
 
