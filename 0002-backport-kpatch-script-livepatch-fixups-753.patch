@@ -1,0 +1,297 @@
+From 2d9606d9b864eec8d81de6952b8816284dec0032 Mon Sep 17 00:00:00 2001
+From: Joe Lawrence <joe.lawrence@redhat.com>
+Date: Thu, 16 Nov 2017 14:21:22 -0500
+Subject: [PATCH] backport "kpatch script - livepatch fixups #753"
+
+This patchset improves livepatch support, most notably adding a
+wait-for-transition loop when (un)loading patch modules and signaling of
+tasks (with a SIGSTOP/SIGCONT combo) that are stalling the transition.
+
+commit a2fbce15872167cfeb2bee4dcf66c33e29e4dfe2
+Author: Joe Lawrence <joe.lawrence@redhat.com>
+Date:   Wed Nov 15 10:44:42 2017 -0500
+
+    kpatch: don't complain about missing livepatch .kpatch.checksum
+
+    The verify_module_checksum() function reads a kpatch-specific ELF
+    section to compare on-disk and in-memory kernel modules.  The function
+    only reports a miscompare if the .kpatch.checksum section actually
+    exists.  Livepatches don't have such section, so throw away any "Section
+    '.kpatch.checksum' was not dumped because it does not exist!" warnings
+    from readelf.
+
+    Signed-off-by: Joe Lawrence <joe.lawrence@redhat.com>
+
+commit fb0bc53eb7540460bc8222313d436b7537aa9952
+Author: Joe Lawrence <joe.lawrence@redhat.com>
+Date:   Wed Nov 15 10:44:42 2017 -0500
+
+    kpatch: show transitioning patches and stalled tasks
+
+    In 'kpatch list' output, show the current patch state: enabled,
+    disabled, and livepatch mid-transition states enabling... and
+    disabling...
+
+    Also provide a list of any tasks that are stalling a livepatch
+    transition.
+
+    Signed-off-by: Joe Lawrence <joe.lawrence@redhat.com>
+
+commit 3582e10e42fed7a08b5cf1ce0b470723428b1386
+Author: Joe Lawrence <joe.lawrence@redhat.com>
+Date:   Wed Nov 15 10:44:42 2017 -0500
+
+    kpatch: signal stalled processes
+
+    Add a "signal" command line option that iterates over all processes that
+    may be holding up the current livepatch transition.  Send such processes
+    a SIGSTOP / SIGCONT combination to try and expedite the transition.
+
+    Signed-off-by: Joe Lawrence <joe.lawrence@redhat.com>
+
+commit 52c12cbad6cd0ca35f892a0b07519b41326ea91e
+Author: Joe Lawrence <joe.lawrence@redhat.com>
+Date:   Wed Nov 15 10:44:42 2017 -0500
+
+    kpatch: wait for livepatch transitions, poke stragglers
+
+    When loading a livepatch, wait for the patching transition to complete
+    within a reasonable timeframe, then poke any stalled tasks with a
+    signal.  If the transition is still taking too long, reverse the patch
+    and unload the livepatch.
+
+    When re-enabling a livepatch, do the same wait and signaling.  If the
+    expected time expires, disable the livepatch.
+
+    When unloading a livepatch, perform the wait/signaling, but only emit an
+    error message if the transition exceeds the time limit.
+
+    Signed-off-by: Joe Lawrence <joe.lawrence@redhat.com>
+
+Signed-off-by: Joe Lawrence <joe.lawrence@redhat.com>
+diff --git a/kpatch/kpatch b/kpatch/kpatch
+index 5998fbc1ba72..a2ac607f6e31 100755
+--- a/kpatch/kpatch
++++ b/kpatch/kpatch
+@@ -26,6 +26,8 @@
+ INSTALLDIR=/var/lib/kpatch
+ SCRIPTDIR="$(readlink -f $(dirname $(type -p $0)))"
+ VERSION="0.4.0"
++POST_ENABLE_WAIT=5	# seconds
++POST_SIGNAL_WAIT=60	# seconds
+ 
+ usage_cmd() {
+ 	printf '   %-20s\n      %s\n' "$1" "$2" >&2
+@@ -49,6 +51,8 @@ usage () {
+ 	echo >&2
+ 	usage_cmd "list" "list installed patch modules"
+ 	echo >&2
++	usage_cmd "signal" "signal/poke any process stalling the current patch transition"
++	echo >&2
+ 	usage_cmd "version" "display the kpatch version"
+ 	exit 1
+ }
+@@ -145,7 +149,7 @@ verify_module_checksum () {
+ 	modname=$(get_module_name $1)
+ 	[[ -z $modname ]] && return 1
+ 
+-	checksum=$(readelf -p .kpatch.checksum $1 | grep '\[.*\]' | awk '{print $3}')
++	checksum="$(readelf -p .kpatch.checksum "$1" 2>&1 | grep '\[.*\]' | awk '{print $3}')"
+ 
+ 	# Fail checksum match only if both exist and diverge
+ 	if [[ ! -z $checksum ]] && [[ -e "$SYSFS/${modname}/checksum" ]] ; then
+@@ -156,6 +160,119 @@ verify_module_checksum () {
+ 	return 0
+ }
+ 
++in_transition() {
++	local moddir="$SYSFS/$1"
++	[[ $(cat "$moddir/transition" 2>/dev/null) == "1" ]] && return 0
++	return 1
++}
++
++is_stalled() {
++	local module="$1"
++	local pid="$2"
++	local patch_enabled
++	local patch_state
++
++	patch_enabled="$(cat "$SYSFS/$module/enabled" 2>/dev/null)"
++	patch_state="$(cat "/proc/$pid/patch_state" 2>/dev/null)"
++
++	# No patch transition in progress
++	[[ "$patch_state" == "-1" ]] && return 1
++
++	[[ -z "$patch_enabled" ]] || [[ -z "$patch_state" ]] && return 1
++
++	# Stalls can be determined if the process state does not match
++	# the transition target (ie, "enabled" and "patched", "disabled"
++	# and "unpatched").  The state value enumerations match, so we
++	# can just compare them directly:
++	[[ "$patch_enabled" != "$patch_state" ]] && return 0
++	return 1
++}
++
++get_transition_patch() {
++	local module
++	local modname
++	for module in "$SYSFS"/*; do
++		modname=$(basename "$module")
++		if in_transition "$modname" ; then
++			echo "$modname"
++			return
++		fi
++	done
++}
++
++show_stalled_processes() {
++	local module
++	local proc_task
++	local tid
++
++	module=$(get_transition_patch)
++	[[ -z "$module" ]] && return
++
++	echo ""
++	echo "Stalled processes:"
++	for proc_task in /proc/[0-9]*/task/[0-9]*; do
++		tid=${proc_task#*/task/}
++		is_stalled "$module" "$tid" && echo "$tid $(cat "$proc_task"/comm 2>/dev/null)"
++	done
++}
++
++signal_stalled_processes() {
++	local module
++	local proc_task
++	local tid
++
++	module=$(get_transition_patch)
++	[[ -z "$module" ]] && return
++
++	if [[ -e "/sys/kernel/livepatch/$module/signal" ]] ; then
++		echo 1 > "/sys/kernel/livepatch/$module/signal"
++	else
++		for proc_task in /proc/[0-9]*/task/[0-9]*; do
++			tid=${proc_task#*/task/}
++			if is_stalled "$module" "$tid" ; then
++				if [[ "$tid" -eq "$$" ]] ; then
++					echo "skipping pid $tid $(cat "$proc_task"/comm 2>/dev/null)"
++				else
++					echo "signaling pid $tid $(cat "$proc_task"/comm 2>/dev/null)"
++					kill -SIGSTOP "$tid"
++					sleep .1
++					kill -SIGCONT "$tid"
++				fi
++			fi
++		done
++	fi
++}
++
++wait_for_patch_transition() {
++	local module="$1"
++	local i
++
++	in_transition "$module" || return 0
++
++	echo "waiting (up to $POST_ENABLE_WAIT seconds) for patch transition to complete..."
++	for (( i=0; i<POST_ENABLE_WAIT; i++ )); do
++		if ! in_transition "$module" ; then
++			echo "transition complete ($i seconds)"
++			return 0
++		fi
++		sleep 1s
++	done
++
++	echo "patch transition has stalled, signaling stalled process(es):"
++	signal_stalled_processes
++
++	echo "waiting (up to $POST_SIGNAL_WAIT seconds) for patch transition to complete..."
++	for (( i=0; i<POST_SIGNAL_WAIT; i++ )); do
++		if ! in_transition "$module" ; then
++			echo "transition complete ($i seconds)"
++			return 0
++		fi
++		sleep 1s
++	done
++
++	return 1
++}
++
+ load_module () {
+ 	local module="$1"
+ 
+@@ -180,6 +297,13 @@ load_module () {
+ 			if verify_module_checksum $module; then # same checksum
+ 				echo "module already loaded, re-enabling"
+ 				echo 1 > ${moddir}/enabled || die "failed to re-enable module $modname"
++				if ! wait_for_patch_transition "$modname" ; then
++					echo "module $modname did not complete its transition, disabling..."
++					echo 0 > "${moddir}/enabled" || die "failed to disable module $modname"
++					wait_for_patch_transition "$modname"
++					die "error: failed to re-enable module $modname (transition stalled), patch disabled"
++				fi
++
+ 				return
+ 			else
+ 				die "error: cannot re-enable patch module $modname, cannot verify checksum match"
+@@ -210,6 +334,12 @@ load_module () {
+ 		fi
+ 	done
+ 
++	if ! wait_for_patch_transition "$modname" ; then
++		echo "module $modname did not complete its transition, unloading..."
++		unload_module "$modname"
++		die "error: failed to load module $modname (transition stalled)"
++	fi
++
+ 	return 0
+ }
+ 
+@@ -223,6 +353,11 @@ unload_module () {
+ 		echo 0 > $ENABLED || die "can't disable $PATCH"
+ 	fi
+ 
++	if ! wait_for_patch_transition "$PATCH" ; then
++		die "error: failed to unload module $PATCH (transition stalled)"
++	fi
++
++
+ 	echo "unloading patch module: $PATCH"
+ 	# ignore any error here because rmmod can fail if the module used
+ 	# KPATCH_FORCE_UNSAFE.
+@@ -352,10 +487,19 @@ case "$1" in
+ 	[[ "$#" -ne 1 ]] && usage
+ 	echo "Loaded patch modules:"
+ 	for module in $SYSFS/*; do
+-		if [[ -e $module ]] && [[ $(cat $module/enabled) -eq 1 ]]; then
+-			echo $(basename "$module")
++		if [[ -e "$module" ]]; then
++			modname=$(basename "$module")
++			if [[ "$(cat "$module/enabled" 2>/dev/null)" -eq 1 ]]; then
++				in_transition "$modname" && state="enabling..." \
++							 || state="enabled"
++			else
++				in_transition "$modname" && state="disabling..." \
++							 || state="disabled"
++			fi
++			echo "$modname [$state]"
+ 		fi
+ 	done
++	show_stalled_processes
+ 	echo ""
+ 	echo "Installed patch modules:"
+ 	for kdir in $INSTALLDIR/*; do
+@@ -376,6 +520,11 @@ case "$1" in
+ 	modinfo "$MODULE" || die "failed to get info for module $PATCH"
+ 	;;
+ 
++"signal")
++	[[ "$#" -ne 1 ]] && usage
++	signal_stalled_processes
++	;;
++
+ "help"|"-h"|"--help")
+ 	usage
+ 	;;
+-- 
+1.8.3.1
