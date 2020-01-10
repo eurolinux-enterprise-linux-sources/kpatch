@@ -1,14 +1,13 @@
 Name:		kpatch
-Version:	0.4.0
-Release:	3%{?dist}
+Version:	0.6.1
+Release:	1%{?dist}
 Summary:	Dynamic kernel patch manager
 
 Group:		System Environment/Kernel
 License:	GPLv2
 URL:		https://github.com/dynup/kpatch
 Source0:	https://github.com/dynup/kpatch/archive/v%{version}.tar.gz
-Patch0:		0001-kpatch-add-ABI-backwards-compatibility.patch
-Patch1:		0002-backport-kpatch-script-livepatch-fixups-753.patch
+Patch0:		0001-contrib-disable-upstart-kpatch.conf-install.patch
 
 Requires:	bash kmod binutils
 
@@ -24,7 +23,6 @@ patch the kernel without rebooting.
 %prep
 %setup -q
 %patch0 -p1
-%patch1 -p1
 
 
 %build
@@ -45,6 +43,9 @@ rm -f %{buildroot}/usr/share/man/man1/kpatch-build.1.gz
 
 
 %changelog
+* Thu Jun 21 2018 Joe Lawrence <joe.lawrence@redhat.com> 0.6.1-1
+- update to 0.6.1 (rhbz#1562976)
+
 * Thu Nov 16 2017 Joe Lawrence <joe.lawrence@redhat.com> 0.4.0-3
 - kpatch: better livepatch module support (rhbz#1504066)
 

@@ -35,8 +35,33 @@
 #define UTS_UBUNTU_RELEASE_ABI 0
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 7, 0)
-#define NEED_KLP_RELOCS
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0) ||			\
+    defined(RHEL_RELEASE_CODE)
+#define HAVE_ELF_RELOCS
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0) ||			\
+    (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0) &&			\
+      UTS_UBUNTU_RELEASE_ABI >= 7) ||					\
+    defined(RHEL_RELEASE_CODE)
+#define HAVE_SYMPOS
+#endif
+
+#ifdef RHEL_RELEASE_CODE
+# if RHEL_RELEASE_CODE <= RHEL_RELEASE_VERSION(7, 5)
+#  define HAVE_IMMEDIATE
+# endif
+#elif (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0) &&		\
+       LINUX_VERSION_CODE <= KERNEL_VERSION(4, 15, 0))
+# define HAVE_IMMEDIATE
+#endif
+
+#ifdef RHEL_RELEASE_CODE
+# if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(7, 5)
+#  define HAVE_CALLBACKS
+# endif
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0)
+# define HAVE_CALLBACKS
 #endif
 
 /*
@@ -57,7 +82,7 @@
  *  done, the scaffold structs are no longer needed.
  */
 
-struct klp_patch *lpatch;
+static struct klp_patch *lpatch;
 
 static LIST_HEAD(patch_objects);
 static int patch_objects_nr;
@@ -65,6 +90,9 @@ struct patch_object {
 	struct list_head list;
 	struct list_head funcs;
 	struct list_head relocs;
+#ifdef HAVE_CALLBACKS
+	struct klp_callbacks callbacks;
+#endif
 	const char *name;
 	int funcs_nr, relocs_nr;
 };
@@ -87,7 +115,7 @@ static struct patch_object *patch_alloc_new_object(const char *name)
 	if (!object)
 		return NULL;
 	INIT_LIST_HEAD(&object->funcs);
-#ifdef NEED_KLP_RELOCS
+#ifndef HAVE_ELF_RELOCS
 	INIT_LIST_HEAD(&object->relocs);
 #endif
 	if (strcmp(name, "vmlinux"))
@@ -129,7 +157,7 @@ static int patch_add_func_to_object(struct kpatch_patch_func *kfunc)
 	return 0;
 }
 
-#ifdef NEED_KLP_RELOCS
+#ifndef HAVE_ELF_RELOCS
 static int patch_add_reloc_to_object(struct kpatch_patch_dynrela *kdynrela)
 {
 	struct patch_reloc *reloc;
@@ -155,7 +183,7 @@ static int patch_add_reloc_to_object(struct kpatch_patch_dynrela *kdynrela)
 static void patch_free_scaffold(void) {
 	struct patch_func *func, *safefunc;
 	struct patch_object *object, *safeobject;
-#ifdef NEED_KLP_RELOCS
+#ifndef HAVE_ELF_RELOCS
 	struct patch_reloc *reloc, *safereloc;
 #endif
 
@@ -165,7 +193,7 @@ static void patch_free_scaffold(void) {
 			list_del(&func->list);
 			kfree(func);
 		}
-#ifdef NEED_KLP_RELOCS
+#ifndef HAVE_ELF_RELOCS
 		list_for_each_entry_safe(reloc, safereloc,
 		                         &object->relocs, list) {
 			list_del(&reloc->list);
@@ -185,7 +213,7 @@ static void patch_free_livepatch(struct klp_patch *patch)
 		for (object = patch->objs; object && object->funcs; object++) {
 			if (object->funcs)
 				kfree(object->funcs);
-#ifdef NEED_KLP_RELOCS
+#ifndef HAVE_ELF_RELOCS
 			if (object->relocs)
 				kfree(object->relocs);
 #endif
@@ -196,8 +224,103 @@ static void patch_free_livepatch(struct klp_patch *patch)
 	}
 }
 
+extern struct kpatch_pre_patch_callback __kpatch_callbacks_pre_patch[], __kpatch_callbacks_pre_patch_end[];
+extern struct kpatch_post_patch_callback __kpatch_callbacks_post_patch[], __kpatch_callbacks_post_patch_end[];
+extern struct kpatch_pre_unpatch_callback __kpatch_callbacks_pre_unpatch[], __kpatch_callbacks_pre_unpatch_end[];
+extern struct kpatch_post_unpatch_callback __kpatch_callbacks_post_unpatch[], __kpatch_callbacks_post_unpatch_end[];
+
+#ifdef HAVE_CALLBACKS
+static int add_callbacks_to_patch_objects(void)
+{
+	struct kpatch_pre_patch_callback *p_pre_patch_callback;
+	struct kpatch_post_patch_callback *p_post_patch_callback;
+	struct kpatch_pre_unpatch_callback *p_pre_unpatch_callback;
+	struct kpatch_post_unpatch_callback *p_post_unpatch_callback;
+	struct patch_object *object;
+
+	for (p_pre_patch_callback = __kpatch_callbacks_pre_patch;
+	     p_pre_patch_callback < __kpatch_callbacks_pre_patch_end;
+	     p_pre_patch_callback++) {
+		object = patch_find_object_by_name(p_pre_patch_callback->objname);
+		if (!object)
+			return -ENOMEM;
+		if (object->callbacks.pre_patch) {
+			pr_err("extra pre-patch callback for object: %s\n",
+				object->name ? object->name : "vmlinux");
+			return -EINVAL;
+		}
+		object->callbacks.pre_patch = (int (*)(struct klp_object *))
+					       p_pre_patch_callback->callback;
+	}
+
+	for (p_post_patch_callback = __kpatch_callbacks_post_patch;
+	     p_post_patch_callback < __kpatch_callbacks_post_patch_end;
+	     p_post_patch_callback++) {
+		object = patch_find_object_by_name(p_post_patch_callback->objname);
+		if (!object)
+			return -ENOMEM;
+		if (object->callbacks.post_patch) {
+			pr_err("extra post-patch callback for object: %s\n",
+				object->name ? object->name : "vmlinux");
+			return -EINVAL;
+		}
+		object->callbacks.post_patch = (void (*)(struct klp_object *))
+						p_post_patch_callback->callback;
+	}
+
+	for (p_pre_unpatch_callback = __kpatch_callbacks_pre_unpatch;
+	     p_pre_unpatch_callback < __kpatch_callbacks_pre_unpatch_end;
+	     p_pre_unpatch_callback++) {
+		object = patch_find_object_by_name(p_pre_unpatch_callback->objname);
+		if (!object)
+			return -ENOMEM;
+		if (object->callbacks.pre_unpatch) {
+			pr_err("extra pre-unpatch callback for object: %s\n",
+				object->name ? object->name : "vmlinux");
+			return -EINVAL;
+		}
+		object->callbacks.pre_unpatch = (void (*)(struct klp_object *))
+						p_pre_unpatch_callback->callback;
+	}
+
+	for (p_post_unpatch_callback = __kpatch_callbacks_post_unpatch;
+	     p_post_unpatch_callback < __kpatch_callbacks_post_unpatch_end;
+	     p_post_unpatch_callback++) {
+		object = patch_find_object_by_name(p_post_unpatch_callback->objname);
+		if (!object)
+			return -ENOMEM;
+		if (object->callbacks.post_unpatch) {
+			pr_err("extra post-unpatch callback for object: %s\n",
+				object->name ? object->name : "vmlinux");
+			return -EINVAL;
+		}
+		object->callbacks.post_unpatch = (void (*)(struct klp_object *))
+						p_post_unpatch_callback->callback;
+	}
+
+	return 0;
+}
+#else /* HAVE_CALLBACKS */
+static inline int add_callbacks_to_patch_objects(void)
+{
+	if (__kpatch_callbacks_pre_patch !=
+	    __kpatch_callbacks_pre_patch_end ||
+	    __kpatch_callbacks_post_patch !=
+	    __kpatch_callbacks_post_patch_end ||
+	    __kpatch_callbacks_pre_unpatch !=
+	    __kpatch_callbacks_pre_unpatch_end ||
+	    __kpatch_callbacks_post_unpatch !=
+	    __kpatch_callbacks_post_unpatch_end) {
+		pr_err("patch callbacks are not supported\n");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+#endif /* HAVE_CALLBACKS */
+
 extern struct kpatch_patch_func __kpatch_funcs[], __kpatch_funcs_end[];
-#ifdef NEED_KLP_RELOCS
+#ifndef HAVE_ELF_RELOCS
 extern struct kpatch_patch_dynrela __kpatch_dynrelas[], __kpatch_dynrelas_end[];
 #endif
 
@@ -209,7 +332,7 @@ static int __init patch_init(void)
 	struct patch_object *object;
 	struct patch_func *func;
 	int ret = 0, i, j;
-#ifdef NEED_KLP_RELOCS
+#ifndef HAVE_ELF_RELOCS
 	struct kpatch_patch_dynrela *kdynrela;
 	struct patch_reloc *reloc;
 	struct klp_reloc *lrelocs, *lreloc;
@@ -224,7 +347,7 @@ static int __init patch_init(void)
 			goto out;
 	}
 
-#ifdef NEED_KLP_RELOCS
+#ifndef HAVE_ELF_RELOCS
 	for (kdynrela = __kpatch_dynrelas;
 	     kdynrela != __kpatch_dynrelas_end;
 	     kdynrela++) {
@@ -233,6 +356,10 @@ static int __init patch_init(void)
 			goto out;
 	}
 #endif
+
+	ret = add_callbacks_to_patch_objects();
+	if (ret)
+		goto out;
 
 	/* past this point, only possible return code is -ENOMEM */
 	ret = -ENOMEM;
@@ -248,6 +375,9 @@ static int __init patch_init(void)
 		goto out;
 	lpatch->mod = THIS_MODULE;
 	lpatch->objs = lobjects;
+#if defined(__powerpc64__) && defined(HAVE_IMMEDIATE)
+	lpatch->immediate = true;
+#endif
 
 	i = 0;
 	list_for_each_entry(object, &patch_objects, list) {
@@ -263,10 +393,7 @@ static int __init patch_init(void)
 			lfunc = &lfuncs[j];
 			lfunc->old_name = func->kfunc->name;
 			lfunc->new_func = (void *)func->kfunc->new_addr;
-#if (( LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0) ) || \
-     ( LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0) && \
-      UTS_UBUNTU_RELEASE_ABI >= 7 ) \
-    )
+#ifdef HAVE_SYMPOS
 			lfunc->old_sympos = func->kfunc->sympos;
 #else
 			lfunc->old_addr = func->kfunc->old_addr;
@@ -274,7 +401,7 @@ static int __init patch_init(void)
 			j++;
 		}
 
-#ifdef NEED_KLP_RELOCS
+#ifndef HAVE_ELF_RELOCS
 		lrelocs = kzalloc(sizeof(struct klp_reloc) *
 				  (object->relocs_nr+1), GFP_KERNEL);
 		if (!lrelocs)
@@ -284,21 +411,22 @@ static int __init patch_init(void)
 		list_for_each_entry(reloc, &object->relocs, list) {
 			lreloc = &lrelocs[j];
 			lreloc->loc = reloc->kdynrela->dest;
-#if (( LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0) ) || \
-     ( LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0) && \
-      UTS_UBUNTU_RELEASE_ABI >= 7 ) \
-    )
+#ifdef HAVE_SYMPOS
 			lreloc->sympos = reloc->kdynrela->sympos;
 #else
 			lreloc->val = reloc->kdynrela->src;
-#endif /* 4.5.0 */
+#endif /* HAVE_SYMPOS */
 			lreloc->type = reloc->kdynrela->type;
 			lreloc->name = reloc->kdynrela->name;
 			lreloc->addend = reloc->kdynrela->addend;
 			lreloc->external = reloc->kdynrela->external;
 			j++;
 		}
-#endif /* 4.7.0 */
+#endif /* HAVE_ELF_RELOCS */
+
+#ifdef HAVE_CALLBACKS
+		lobject->callbacks = object->callbacks;
+#endif
 
 		i++;
 	}

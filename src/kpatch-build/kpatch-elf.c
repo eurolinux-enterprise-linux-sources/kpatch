@@ -71,7 +71,9 @@ int is_debug_section(struct section *sec)
 		name = sec->base->name;
 	else
 		name = sec->name;
-	return !strncmp(name, ".debug_", 7);
+
+	return !strncmp(name, ".debug_", 7) ||
+	       !strncmp(name, ".eh_frame", 9);
 }
 
 struct section *find_section_by_index(struct list_head *list, unsigned int index)
@@ -257,41 +259,11 @@ void kpatch_create_section_list(struct kpatch_elf *kelf)
 		ERROR("expected NULL");
 }
 
-static int is_bundleable(struct symbol *sym)
-{
-	if (sym->type == STT_FUNC &&
-	    !strncmp(sym->sec->name, ".text.",6) &&
-	    !strcmp(sym->sec->name + 6, sym->name))
-		return 1;
-
-	if (sym->type == STT_FUNC &&
-	    !strncmp(sym->sec->name, ".text.unlikely.",15) &&
-	    !strcmp(sym->sec->name + 15, sym->name))
-		return 1;
-
-	if (sym->type == STT_OBJECT &&
-	   !strncmp(sym->sec->name, ".data.",6) &&
-	   !strcmp(sym->sec->name + 6, sym->name))
-		return 1;
-
-	if (sym->type == STT_OBJECT &&
-	   !strncmp(sym->sec->name, ".rodata.",8) &&
-	   !strcmp(sym->sec->name + 8, sym->name))
-		return 1;
-
-	if (sym->type == STT_OBJECT &&
-	   !strncmp(sym->sec->name, ".bss.",5) &&
-	   !strcmp(sym->sec->name + 5, sym->name))
-		return 1;
-
-	return 0;
-}
-
 void kpatch_create_symbol_list(struct kpatch_elf *kelf)
 {
 	struct section *symtab;
 	struct symbol *sym;
-	int symbols_nr, index = 0;
+	unsigned int symbols_nr, index = 0;
 
 	symtab = find_section_by_name(&kelf->sections, ".symtab");
 	if (!symtab)
@@ -325,12 +297,7 @@ void kpatch_create_symbol_list(struct kpatch_elf *kelf)
 				ERROR("couldn't find section for symbol %s\n",
 					sym->name);
 
-			if (is_bundleable(sym)) {
-				if (sym->sym.st_value != 0)
-					ERROR("symbol %s at offset %lu within section %s, expected 0",
-					      sym->name, sym->sym.st_value, sym->sec->name);
-				sym->sec->sym = sym;
-			} else if (sym->type == STT_SECTION) {
+			if (sym->type == STT_SECTION) {
 				sym->sec->secsym = sym;
 				/* use the section name as the symbol name */
 				sym->name = sym->sec->name;
@@ -347,22 +314,30 @@ void kpatch_create_symbol_list(struct kpatch_elf *kelf)
 
 }
 
-/* Check which functions have fentry calls; save this info for later use. */
-static void kpatch_find_fentry_calls(struct kpatch_elf *kelf)
+/* Check which functions have fentry/mcount calls; save this info for later use. */
+static void kpatch_find_func_profiling_calls(struct kpatch_elf *kelf)
 {
 	struct symbol *sym;
 	struct rela *rela;
 	list_for_each_entry(sym, &kelf->symbols, list) {
 		if (sym->type != STT_FUNC || !sym->sec || !sym->sec->rela)
 			continue;
-
+#ifdef __powerpc64__
+		list_for_each_entry(rela, &sym->sec->rela->relas, list) {
+			if (!strcmp(rela->sym->name, "_mcount")) {
+				sym->has_func_profiling = 1;
+				break;
+			}
+		}
+#else
 		rela = list_first_entry(&sym->sec->rela->relas, struct rela,
 					list);
 		if (rela->type != R_X86_64_NONE ||
 		    strcmp(rela->sym->name, "__fentry__"))
 			continue;
 
-		sym->has_fentry_call = 1;
+		sym->has_func_profiling = 1;
+#endif
 	}
 }
 
@@ -403,7 +378,7 @@ struct kpatch_elf *kpatch_elf_open(const char *name)
 		kpatch_create_rela_list(kelf, sec);
 	}
 
-	kpatch_find_fentry_calls(kelf);
+	kpatch_find_func_profiling_calls(kelf);
 	return kelf;
 }
 
@@ -477,7 +452,7 @@ int is_local_sym(struct symbol *sym)
 
 void print_strtab(char *buf, size_t size)
 {
-	int i;
+	size_t i;
 
 	for (i = 0; i < size; i++) {
 		if (buf[i] == 0)
@@ -651,6 +626,7 @@ struct section *create_section_pair(struct kpatch_elf *kelf, char *name,
 	sec->data->d_buf = malloc(size);
 	if (!sec->data->d_buf)
 		ERROR("malloc");
+	memset(sec->data->d_buf, 0, size);
 	sec->data->d_size = size;
 	sec->data->d_type = ELF_T_BYTE;
 
@@ -721,7 +697,7 @@ void kpatch_reindex_elements(struct kpatch_elf *kelf)
 {
 	struct section *sec;
 	struct symbol *sym;
-	int index;
+	unsigned int index;
 
 	index = 1; /* elf write function handles NULL section 0 */
 	list_for_each_entry(sec, &kelf->sections, list)

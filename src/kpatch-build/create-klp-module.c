@@ -81,7 +81,7 @@ static struct symbol *find_or_add_ksym_to_symbols(struct kpatch_elf *kelf,
 			return sym;
 	}
 
-	ALLOC_LINK(sym, &kelf->symbols);
+	ALLOC_LINK(sym, NULL);
 	sym->name = strdup(buf);
 	if (!sym->name)
 		ERROR("strdup");
@@ -93,6 +93,25 @@ static struct symbol *find_or_add_ksym_to_symbols(struct kpatch_elf *kelf,
 	 */
 	sym->sym.st_shndx = SHN_LIVEPATCH;
 	sym->sym.st_info = GELF_ST_INFO(sym->bind, sym->type);
+	/*
+	 * Figure out where to put the new symbol:
+	 *   a) locals need to be grouped together, before globals
+	 *   b) globals can be tacked into the end of the list
+	 */
+	if (is_local_sym(sym)) {
+		struct list_head *head;
+		struct symbol *s;
+
+		head = &kelf->symbols;
+		list_for_each_entry(s, &kelf->symbols, list) {
+			if (!is_local_sym(s))
+				break;
+			head = &s->list;
+		}
+		list_add_tail(&sym->list, head);
+	} else {
+		list_add_tail(&sym->list, &kelf->symbols);
+	}
 
 	return sym;
 }
@@ -155,12 +174,12 @@ static struct section *find_or_add_klp_relasec(struct kpatch_elf *kelf,
 static void create_klp_relasecs_and_syms(struct kpatch_elf *kelf, struct section *krelasec,
 					 struct section *ksymsec, char *strings)
 {
-	struct section *base, *klp_relasec;
+	struct section *klp_relasec;
 	struct kpatch_relocation *krelas;
-	struct symbol *sym;
+	struct symbol *sym, *dest;
 	struct rela *rela;
 	char *objname;
-	int nr, index, offset;
+	int nr, index, offset, dest_off;
 
 	krelas = krelasec->data->d_buf;
 	nr = krelasec->data->d_size / sizeof(*krelas);
@@ -168,17 +187,16 @@ static void create_klp_relasecs_and_syms(struct kpatch_elf *kelf, struct section
 	for (index = 0; index < nr; index++) {
 		offset = index * sizeof(*krelas);
 
-		/* Get the base section to which the rela applies */
+		/* Get the rela dest sym + offset */
 		rela = find_rela_by_offset(krelasec->rela,
 					   offset + offsetof(struct kpatch_relocation, dest));
 		if (!rela)
 			ERROR("find_rela_by_offset");
 
-		base = rela->sym->sec;
-		if (!base)
-			ERROR("base sec of krela not found");
+		dest = rela->sym;
+		dest_off = rela->addend;
 
-		/* Get the name of the object the rela belongs to */
+		/* Get the name of the object the dest belongs to */
 		rela = find_rela_by_offset(krelasec->rela,
 					   offset + offsetof(struct kpatch_relocation, objname));
 		if (!rela)
@@ -188,27 +206,27 @@ static void create_klp_relasecs_and_syms(struct kpatch_elf *kelf, struct section
 		if (!objname)
 			ERROR("strdup");
 
-		/* Get the corresponding .kpatch.symbol entry */
+		/* Get the .kpatch.symbol entry for the rela src */
 		rela = find_rela_by_offset(krelasec->rela,
 					   offset + offsetof(struct kpatch_relocation, ksym));
 		if (!rela)
 			ERROR("find_rela_by_offset");
 
-		/* Create (or find) a real symbol out of the .kpatch.symbol entry */
+		/* Create (or find) a klp symbol from the rela src entry */
 		sym = find_or_add_ksym_to_symbols(kelf, ksymsec, strings, rela->addend);
 		if (!sym)
 			ERROR("error finding or adding ksym to symtab");
 
-		/* Create (or find) the .klp.rela. section for this base sec and object */
-		klp_relasec = find_or_add_klp_relasec(kelf, base, objname);
+		/* Create (or find) the .klp.rela. section for the dest sec and object */
+		klp_relasec = find_or_add_klp_relasec(kelf, dest->sec, objname);
 		if (!klp_relasec)
 			ERROR("error finding or adding klp relasec");
 
-		/* Add the rela to the .klp.rela. section */
+		/* Add the klp rela to the .klp.rela. section */
 		ALLOC_LINK(rela, &klp_relasec->relas);
-		rela->sym = sym;
+		rela->offset = dest->sym.st_value + dest_off;
 		rela->type = krelas[index].type;
-		rela->offset = krelas[index].offset;
+		rela->sym = sym;
 		rela->addend = krelas[index].addend;
 	}
 }
@@ -293,6 +311,27 @@ static void create_klp_arch_sections(struct kpatch_elf *kelf, char *strings)
 		 * single .klp.arch.vmlinux..parainstructions section
 		 */
 		old_size = sec->data->d_size;
+
+		/*
+		 * Due to a quirk in how .parainstructions gets linked, the
+		 * section size doesn't encompass the last 4 bytes of the last
+		 * entry.  Align the old size properly before merging.
+		 */
+		if (!strcmp(base->name, ".parainstructions")) {
+			char *str;
+			static int align_mask = 0;
+
+			if (!align_mask) {
+				str = getenv("PARA_STRUCT_SIZE");
+				if (!str)
+					ERROR("PARA_STRUCT_SIZE not set");
+
+				align_mask = atoi(str) - 1;
+			}
+
+			old_size = (old_size + align_mask) & ~align_mask;
+		}
+
 		new_size = old_size + base->data->d_size;
 		sec->data->d_buf = realloc(sec->data->d_buf, new_size);
 		sec->data->d_size = new_size;
@@ -317,7 +356,7 @@ static void create_klp_arch_sections(struct kpatch_elf *kelf, char *strings)
  */
 static void remove_arch_sections(struct kpatch_elf *kelf)
 {
-	int i;
+	size_t i;
 	char *arch_sections[] = {
 		".parainstructions",
 		".rela.parainstructions",
@@ -332,7 +371,7 @@ static void remove_arch_sections(struct kpatch_elf *kelf)
 
 static void remove_intermediate_sections(struct kpatch_elf *kelf)
 {
-	int i;
+	size_t i;
 	char *intermediate_sections[] = {
 		".kpatch.symbols",
 		".rela.kpatch.symbols",
@@ -402,7 +441,7 @@ int main(int argc, char *argv[])
 	char *strings;
 	int ksyms_nr, krelas_nr;
 
-	arguments.debug = 0;
+	memset(&arguments, 0, sizeof(arguments));
 	argp_parse (&argp, argc, argv, 0, 0, &arguments);
 	if (arguments.debug)
 		loglevel = DEBUG;

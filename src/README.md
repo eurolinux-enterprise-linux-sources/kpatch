@@ -13,7 +13,7 @@ may occur!**
 
 Here's a video of kpatch in action:
 
-[![kpatch video](http://img.youtube.com/vi/juyQ5TsJRTA/0.jpg)](http://www.youtube.com/watch?v=juyQ5TsJRTA)
+[![kpatch video](https://img.youtube.com/vi/juyQ5TsJRTA/0.jpg)](https://www.youtube.com/watch?v=juyQ5TsJRTA)
 
 And a few more:
 
@@ -23,9 +23,9 @@ And a few more:
 Installation
 ------------
 
-###Prerequisites
+### Prerequisites
 
-####Fedora
+#### Fedora
 
 *NOTE: You'll need about 15GB of free disk space for the kpatch-build cache in
 `~/.kpatch` and for ccache.*
@@ -40,7 +40,7 @@ sudo dnf install gcc kernel-devel-${UNAME%.*} elfutils elfutils-devel
 Install the dependencies for the "kpatch-build" command:
 
 ```bash
-sudo dnf install rpmdevtools pesign yum-utils openssl wget numactl-devel
+sudo dnf install pesign yum-utils openssl wget numactl-devel
 sudo dnf builddep kernel-${UNAME%.*}
 sudo dnf debuginfo-install kernel-${UNAME%.*}
 
@@ -52,7 +52,7 @@ ccache --max-size=5G
 sudo dnf install patchutils
 ```
 
-####RHEL 7
+#### RHEL 7
 
 *NOTE: You'll need about 15GB of free disk space for the kpatch-build cache in
 `~/.kpatch` and for ccache.*
@@ -68,7 +68,7 @@ Install the dependencies for the "kpatch-build" command:
 
 ```bash
 sudo yum-config-manager --enable rhel-7-server-optional-rpms
-sudo yum install rpmdevtools pesign yum-utils zlib-devel \
+sudo yum install pesign yum-utils zlib-devel \
   binutils-devel newt-devel python-devel perl-ExtUtils-Embed \
   audit-libs-devel numactl-devel pciutils-devel bison ncurses-devel
 
@@ -76,14 +76,14 @@ sudo yum-builddep kernel-${UNAME%.*}
 sudo debuginfo-install kernel-${UNAME%.*}
 
 # optional, but highly recommended
-sudo yum install https://dl.fedoraproject.org/pub/epel/7/x86_64/c/ccache-3.2.7-3.el7.x86_64.rpm
+sudo yum install https://dl.fedoraproject.org/pub/epel/7/x86_64/Packages/c/ccache-3.3.4-1.el7.x86_64.rpm
 ccache --max-size=5G
 
 # optional, for kpatch-test
-sudo dnf install patchutils
+sudo yum install patchutils
 ```
 
-####CentOS 7
+#### CentOS 7
 
 *NOTE: You'll need about 15GB of free disk space for the kpatch-build cache in
 `~/.kpatch` and for ccache.*
@@ -98,7 +98,7 @@ sudo yum install gcc kernel-devel-${UNAME%.*} elfutils elfutils-devel
 Install the dependencies for the "kpatch-build" command:
 
 ```bash
-sudo yum install rpmdevtools pesign yum-utils zlib-devel \
+sudo yum install pesign yum-utils zlib-devel \
   binutils-devel newt-devel python-devel perl-ExtUtils-Embed \
   audit-libs audit-libs-devel numactl-devel pciutils-devel bison
 
@@ -113,10 +113,10 @@ sudo yum install ccache
 ccache --max-size=5G
 
 # optional, for kpatch-test
-sudo dnf install patchutils
+sudo yum install patchutils
 ```
 
-####Oracle Linux 7
+#### Oracle Linux 7
 
 *NOTE: You'll need about 15GB of free disk space for the kpatch-build cache in
 `~/.kpatch` and for ccache.*
@@ -131,7 +131,7 @@ sudo yum install gcc kernel-devel-${UNAME%.*} elfutils elfutils-devel
 Install the dependencies for the "kpatch-build" command:
 
 ```bash
-sudo yum install rpmdevtools pesign yum-utils zlib-devel \
+sudo yum install pesign yum-utils zlib-devel \
   binutils-devel newt-devel python-devel perl-ExtUtils-Embed \
   audit-libs numactl-devel pciutils-devel bison
 
@@ -149,10 +149,10 @@ sudo yum install ccache
 ccache --max-size=5G
 
 # optional, for kpatch-test
-sudo dnf install patchutils
+sudo yum install patchutils
 ```
 
-####Ubuntu 14.04
+#### Ubuntu 14.04
 
 *NOTE: You'll need about 15GB of free disk space for the kpatch-build cache in
 `~/.kpatch` and for ccache.*
@@ -166,7 +166,7 @@ apt-get install make gcc libelf-dev
 Install the dependencies for the "kpatch-build" command:
 
 ```bash
-apt-get install dpkg-dev
+apt-get install dpkg-dev devscripts
 apt-get build-dep linux
 
 # optional, but highly recommended
@@ -190,8 +190,19 @@ EOF
 wget -Nq http://ddebs.ubuntu.com/dbgsym-release-key.asc -O- | sudo apt-key add -
 apt-get update && apt-get install linux-image-$(uname -r)-dbgsym
 ```
+If there are no packages published yet to the codename-security pocket, the
+apt update may report a "404 Not Found" error, as well as a complaint about
+disabling the repository by default.  This message may be ignored (see issue
+#710).
 
-####Debian 8.0
+#### Debian 9 (Stretch)
+
+Since Stretch the stock kernel can be used without changes, however the
+version of kpatch in Stretch is too old so you still need to build it
+manually. Follow the instructions for Debian Jessie (next section) but skip
+building a custom kernel/rebooting.
+
+#### Debian 8 (Jessie)
 
 *NOTE: You'll need about 15GB of free disk space for the kpatch-build cache in
 `~/.kpatch` and for ccache.*
@@ -225,7 +236,7 @@ Install the dependencies for the "kpatch-build" command:
     apt-get install ccache
     ccache --max-size=5G
 
-####Debian 7.x
+#### Debian 7 (Lenny)
 
 *NOTE: You'll need about 15GB of free disk space for the kpatch-build cache in
 `~/.kpatch` and for ccache.*
@@ -259,14 +270,37 @@ Configure ccache (installed by kpatch package):
 
     ccache --max-size=5G
 
+#### Gentoo
 
-###Build
+*NOTE: You'll need about 15GB of free disk space for the kpatch-build cache in
+`~/.kpatch` and for ccache.*
+
+Install Kpatch and Kpatch dependencies:
+
+```bash
+emerge --ask sys-kernel/kpatch
+```
+
+Install ccache (optional):
+
+```bash
+emerge --ask dev-util/ccache
+```
+
+Configure ccache:
+
+```bash
+ccache --max-size=5G
+```
+
+### Build
 
 Compile kpatch:
 
     make
 
-###Install
+
+### Install
 
 OPTIONAL: Install kpatch to `/usr/local`:
 
@@ -347,6 +381,7 @@ can have some major pitfalls if you're not careful.  To learn more about how to
 properly create live patches, see the [Patch Author
 Guide](doc/patch-author-guide.md).
 
+
 How it works
 ------------
 
@@ -400,6 +435,7 @@ The primary steps in kpatch-build are:
 	* Generate the resulting output object containing the new and modified sections
 - Link all the output objects into a cumulative object
 - Generate the patch module
+
 
 ### Patching
 
@@ -504,7 +540,7 @@ updating the instruction directly.  This approach also ensures that the code
 modification path is reliable, since ftrace has been doing it successfully for
 years.
 
-**Q Is kpatch compatible with \<insert kernel debugging subsystem here\>?**
+**Q. Is kpatch compatible with \<insert kernel debugging subsystem here\>?**
 
 We aim to be good kernel citizens and maintain compatibility.  A kpatch
 replacement function is no different than a function loaded by any other kernel
@@ -514,7 +550,8 @@ so it looks like a normal function to the kernel.
 - **oops stack traces**: Yes.  If the replacement function is involved in an
   oops, the stack trace will show the function and kernel module name of the
   replacement function, just like any other kernel module function.  The oops
-  message will also show the taint flag (currently `TAINT_USER`).
+  message will also show the taint flag (see the FAQ "How can I detect if
+  somebody has patched the kernel" for specifics).
 - **kdump/crash**: Yes.  Replacement functions are normal functions, so crash
   will have no issues.
 - **ftrace**: Yes, but certain uses of ftrace which involve opening the
@@ -550,7 +587,7 @@ We hope to make the following changes to other projects:
 	- ftrace improvements to close any windows that would allow a patch to
 	  be inadvertently disabled
 
-**Q: Is it possible to register a function that gets called atomically with
+**Q. Is it possible to register a function that gets called atomically with
 `stop_machine` when the patch module loads and unloads?**
 
 We do have plans to implement something like that.
@@ -612,6 +649,7 @@ Contributions are very welcome.  Feel free to open issues or PRs on github.
 For big PRs, it's a good idea to discuss them first in github issues or on the
 [mailing list](https://www.redhat.com/mailman/listinfo/kpatch) before you write
 a lot of code.
+
 
 License
 -------

@@ -58,6 +58,7 @@
 	!defined(CONFIG_HAVE_FENTRY) || \
 	!defined(CONFIG_MODULES) || \
 	!defined(CONFIG_SYSFS) || \
+	!defined(CONFIG_STACKTRACE) || \
 	!defined(CONFIG_KALLSYMS_ALL)
 #error "CONFIG_FUNCTION_TRACER, CONFIG_HAVE_FENTRY, CONFIG_MODULES, CONFIG_SYSFS, CONFIG_KALLSYMS_ALL kernel config options are required"
 #endif
@@ -139,7 +140,7 @@ static int (*kpatch_set_memory_ro)(unsigned long addr, int numpages);
 
 #define MAX_STACK_TRACE_DEPTH   64
 static unsigned long stack_entries[MAX_STACK_TRACE_DEPTH];
-struct stack_trace trace = {
+static struct stack_trace trace = {
 	.max_entries	= ARRAY_SIZE(stack_entries),
 	.entries	= &stack_entries[0],
 };
@@ -305,12 +306,52 @@ out:
 	return ret;
 }
 
+static inline int pre_patch_callback(struct kpatch_object *object)
+{
+	int ret;
+
+	if (kpatch_object_linked(object) &&
+	    object->pre_patch_callback) {
+		ret = (*object->pre_patch_callback)(object);
+		if (ret) {
+			object->callbacks_enabled = false;
+			return ret;
+		}
+	}
+	object->callbacks_enabled = true;
+
+	return 0;
+}
+
+static inline void post_patch_callback(struct kpatch_object *object)
+{
+	if (kpatch_object_linked(object) &&
+	    object->post_patch_callback &&
+	    object->callbacks_enabled)
+		(*object->post_patch_callback)(object);
+}
+
+static inline void pre_unpatch_callback(struct kpatch_object *object)
+{
+	if (kpatch_object_linked(object) &&
+	    object->pre_unpatch_callback &&
+	    object->callbacks_enabled)
+		(*object->pre_unpatch_callback)(object);
+}
+
+static inline void post_unpatch_callback(struct kpatch_object *object)
+{
+	if (kpatch_object_linked(object) &&
+	    object->post_unpatch_callback &&
+	    object->callbacks_enabled)
+		(*object->post_unpatch_callback)(object);
+}
+
 /* Called from stop_machine */
 static int kpatch_apply_patch(void *data)
 {
 	struct kpatch_module *kpmod = data;
 	struct kpatch_func *func;
-	struct kpatch_hook *hook;
 	struct kpatch_object *object;
 	int ret;
 
@@ -318,6 +359,16 @@ static int kpatch_apply_patch(void *data)
 	if (ret) {
 		kpatch_state_finish(KPATCH_STATE_FAILURE);
 		return ret;
+	}
+
+	/* run any user-defined pre-patch callbacks */
+	list_for_each_entry(object, &kpmod->objects, list) {
+		ret = pre_patch_callback(object);
+		if (ret) {
+			pr_err("pre-patch callback failed!\n");
+			kpatch_state_finish(KPATCH_STATE_FAILURE);
+			goto err;
+		}
 	}
 
 	/* tentatively add the new funcs to the global func hash */
@@ -341,19 +392,21 @@ static int kpatch_apply_patch(void *data)
 			hash_del_rcu(&func->node);
 		} while_for_each_linked_func();
 
-		return -EBUSY;
+		ret = -EBUSY;
+		goto err;
 	}
 
-	/* run any user-defined load hooks */
-	list_for_each_entry(object, &kpmod->objects, list) {
-		if (!kpatch_object_linked(object))
-			continue;
-		list_for_each_entry(hook, &object->hooks_load, list)
-			(*hook->hook)();
-	}
-
+	/* run any user-defined post-patch callbacks */
+	list_for_each_entry(object, &kpmod->objects, list)
+		post_patch_callback(object);
 
 	return 0;
+err:
+	/* undo pre-patch callbacks by calling post-unpatch counterparts */
+	list_for_each_entry(object, &kpmod->objects, list)
+		post_unpatch_callback(object);
+
+	return ret;
 }
 
 /* Called from stop_machine */
@@ -361,7 +414,6 @@ static int kpatch_remove_patch(void *data)
 {
 	struct kpatch_module *kpmod = data;
 	struct kpatch_func *func;
-	struct kpatch_hook *hook;
 	struct kpatch_object *object;
 	int ret;
 
@@ -371,25 +423,34 @@ static int kpatch_remove_patch(void *data)
 		return ret;
 	}
 
+	/* run any user-defined pre-unpatch callbacks */
+	list_for_each_entry(object, &kpmod->objects, list)
+		pre_unpatch_callback(object);
+
 	/* Check if any inconsistent NMI has happened while updating */
 	ret = kpatch_state_finish(KPATCH_STATE_SUCCESS);
-	if (ret == KPATCH_STATE_FAILURE)
-		return -EBUSY;
+	if (ret == KPATCH_STATE_FAILURE) {
+		ret = -EBUSY;
+		goto err;
+	}
 
 	/* Succeeded, remove all updating funcs from hash table */
 	do_for_each_linked_func(kpmod, func) {
 		hash_del_rcu(&func->node);
 	} while_for_each_linked_func();
 
-	/* run any user-defined unload hooks */
-	list_for_each_entry(object, &kpmod->objects, list) {
-		if (!kpatch_object_linked(object))
-			continue;
-		list_for_each_entry(hook, &object->hooks_unload, list)
-			(*hook->hook)();
-	}
+	/* run any user-defined post-unpatch callbacks */
+	list_for_each_entry(object, &kpmod->objects, list)
+		post_unpatch_callback(object);
 
 	return 0;
+
+err:
+	/* undo pre-unpatch callbacks by calling post-patch counterparts */
+	list_for_each_entry(object, &kpmod->objects, list)
+		post_patch_callback(object);
+
+	return ret;
 }
 
 /*
@@ -676,7 +737,7 @@ static int kpatch_write_relocations(struct kpatch_module *kpmod,
 			continue;
 		}
 
-#ifdef CONFIG_DEBUG_SET_MODULE_RONX
+#if defined(CONFIG_DEBUG_SET_MODULE_RONX) || defined(CONFIG_ARCH_HAS_SET_MEMORY)
 #if (( LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0) ) || \
      ( LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0) && \
       UTS_UBUNTU_RELEASE_ABI >= 7 ) \
@@ -723,8 +784,10 @@ static int kpatch_unlink_object(struct kpatch_object *object)
 		}
 	}
 
-	if (object->mod)
+	if (object->mod) {
 		module_put(object->mod);
+		object->mod = NULL;
+	}
 
 	return 0;
 }
@@ -801,14 +864,13 @@ err_put:
 	return ret;
 }
 
-static int kpatch_module_notify(struct notifier_block *nb, unsigned long action,
-				void *data)
+static int kpatch_module_notify_coming(struct notifier_block *nb,
+				       unsigned long action, void *data)
 {
 	struct module *mod = data;
 	struct kpatch_module *kpmod;
 	struct kpatch_object *object;
 	struct kpatch_func *func;
-	struct kpatch_hook *hook;
 	int ret = 0;
 	bool found = false;
 
@@ -839,20 +901,72 @@ done:
 
 	pr_notice("patching newly loaded module '%s'\n", object->name);
 
-	/* run any user-defined load hooks */
-	list_for_each_entry(hook, &object->hooks_load, list)
-		(*hook->hook)();
+	/* run user-defined pre-patch callback */
+	ret = pre_patch_callback(object);
+	if (ret) {
+		pr_err("pre-patch callback failed!\n");
+		goto out;	/* and WARN */
+	}
 
 	/* add to the global func hash */
 	list_for_each_entry(func, &object->funcs, list)
 		hash_add_rcu(kpatch_func_hash, &func->node, func->old_addr);
 
+	/* run user-defined post-patch callback */
+	post_patch_callback(object);
 out:
 	up(&kpatch_mutex);
 
 	/* no way to stop the module load on error */
 	WARN(ret, "error (%d) patching newly loaded module '%s'\n", ret,
 	     object->name);
+
+	return 0;
+}
+
+static int kpatch_module_notify_going(struct notifier_block *nb,
+				      unsigned long action, void *data)
+{
+	struct module *mod = data;
+	struct kpatch_module *kpmod;
+	struct kpatch_object *object;
+	struct kpatch_func *func;
+	bool found = false;
+
+	if (action != MODULE_STATE_GOING)
+		return 0;
+
+	down(&kpatch_mutex);
+
+	list_for_each_entry(kpmod, &kpmod_list, list) {
+		list_for_each_entry(object, &kpmod->objects, list) {
+			if (!kpatch_object_linked(object))
+				continue;
+			if (!strcmp(object->name, mod->name)) {
+				found = true;
+				goto done;
+			}
+		}
+	}
+done:
+	if (!found)
+		goto out;
+
+	/* run user-defined pre-unpatch callback */
+	pre_unpatch_callback(object);
+
+	/* remove from the global func hash */
+	list_for_each_entry(func, &object->funcs, list)
+		hash_del_rcu(&func->node);
+
+	/* run user-defined pre-unpatch callback */
+	post_unpatch_callback(object);
+
+	kpatch_unlink_object(object);
+
+out:
+	up(&kpatch_mutex);
+
 	return 0;
 }
 
@@ -1100,9 +1214,13 @@ out:
 EXPORT_SYMBOL(kpatch_unregister);
 
 
-static struct notifier_block kpatch_module_nb = {
-	.notifier_call = kpatch_module_notify,
+static struct notifier_block kpatch_module_nb_coming = {
+	.notifier_call = kpatch_module_notify_coming,
 	.priority = INT_MIN, /* called last */
+};
+static struct notifier_block kpatch_module_nb_going = {
+	.notifier_call = kpatch_module_notify_going,
+	.priority = INT_MAX, /* called first */
 };
 
 static int kpatch_init(void)
@@ -1125,12 +1243,17 @@ static int kpatch_init(void)
 	if (!kpatch_root_kobj)
 		return -ENOMEM;
 
-	ret = register_module_notifier(&kpatch_module_nb);
+	ret = register_module_notifier(&kpatch_module_nb_coming);
 	if (ret)
 		goto err_root_kobj;
+	ret = register_module_notifier(&kpatch_module_nb_going);
+	if (ret)
+		goto err_unregister_coming;
 
 	return 0;
 
+err_unregister_coming:
+	WARN_ON(unregister_module_notifier(&kpatch_module_nb_coming));
 err_root_kobj:
 	kobject_put(kpatch_root_kobj);
 	return ret;
@@ -1141,7 +1264,8 @@ static void kpatch_exit(void)
 	rcu_barrier();
 
 	WARN_ON(kpatch_num_patched != 0);
-	WARN_ON(unregister_module_notifier(&kpatch_module_nb));
+	WARN_ON(unregister_module_notifier(&kpatch_module_nb_coming));
+	WARN_ON(unregister_module_notifier(&kpatch_module_nb_going));
 	kobject_put(kpatch_root_kobj);
 }
 
