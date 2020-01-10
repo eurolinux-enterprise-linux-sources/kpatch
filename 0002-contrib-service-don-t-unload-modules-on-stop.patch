@@ -1,0 +1,31 @@
+From 8909e63c54adb34a0324200f99c63fcd7db5cbc5 Mon Sep 17 00:00:00 2001
+From: Joe Lawrence <joe.lawrence@redhat.com>
+Date: Mon, 10 Jun 2019 16:55:54 -0400
+Subject: [PATCH] contrib/service: don't unload modules on stop
+
+The kpatch.service file shouldn't unload patch modules on service stop
+(this is also executed by systemd on reboot).  Patch modules may not be
+designed to be safely unloaded and/or may patch kernel routines that
+need to continue to run throughout system bring down.
+
+Suggested-by: disaster123
+Signed-off-by: Joe Lawrence <joe.lawrence@redhat.com>
+---
+ contrib/kpatch.service | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/contrib/kpatch.service b/contrib/kpatch.service
+index 5286f6c929e0..cf13f40105d9 100644
+--- a/contrib/kpatch.service
++++ b/contrib/kpatch.service
+@@ -6,7 +6,6 @@ ConditionKernelCommandLine=!kpatch.enable=0
+ Type=oneshot
+ RemainAfterExit=yes
+ ExecStart=PREFIX/sbin/kpatch load --all
+-ExecStop=PREFIX/sbin/kpatch unload --all
+ 
+ [Install]
+ WantedBy=multi-user.target
+-- 
+2.21.0
+

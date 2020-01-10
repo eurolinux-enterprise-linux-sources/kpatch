@@ -1,6 +1,6 @@
 Name:		kpatch
 Version:	0.6.1
-Release:	1%{?dist}
+Release:	4%{?dist}
 Summary:	Dynamic kernel patch manager
 
 Group:		System Environment/Kernel
@@ -8,6 +8,8 @@ License:	GPLv2
 URL:		https://github.com/dynup/kpatch
 Source0:	https://github.com/dynup/kpatch/archive/v%{version}.tar.gz
 Patch0:		0001-contrib-disable-upstart-kpatch.conf-install.patch
+Patch1:		0002-contrib-service-don-t-unload-modules-on-stop.patch
+Patch2:		0003-kpatch-script-don-t-fail-if-module-already-loaded-en.patch
 
 Requires:	bash kmod binutils
 
@@ -23,6 +25,8 @@ patch the kernel without rebooting.
 %prep
 %setup -q
 %patch0 -p1
+%patch1 -p1
+%patch2 -p1
 
 
 %build
@@ -43,6 +47,15 @@ rm -f %{buildroot}/usr/share/man/man1/kpatch-build.1.gz
 
 
 %changelog
+* Sun Jun 23 2019 Joe Lawrence <joe.lawrence@redhat.com> 0.6.1-3
+- Rebuild with correct RHEL-7.7 bugzilla number (rhbz#1719309)
+
+* Sun Jun 23 2019 Joe Lawrence <joe.lawrence@redhat.com> 0.6.1-3
+- kpatch script: don't fail if module already loaded+enabled (rhbz#1719309)
+
+* Wed Jun 12 2019 Joe Lawrence <joe.lawrence@redhat.com> 0.6.1-2
+- kpatch: patches shouldn't be unloaded on system shutdown (rhbz#1719309)
+
 * Thu Jun 21 2018 Joe Lawrence <joe.lawrence@redhat.com> 0.6.1-1
 - update to 0.6.1 (rhbz#1562976)
 

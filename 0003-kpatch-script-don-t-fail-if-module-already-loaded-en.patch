@@ -1,0 +1,77 @@
+From 1d2dffec7a6fad4a8daed9340cd42aada856d03f Mon Sep 17 00:00:00 2001
+From: Joe Lawrence <joe.lawrence@redhat.com>
+Date: Wed, 19 Jun 2019 15:29:43 -0400
+Subject: [PATCH] kpatch script: don't fail if module already loaded+enabled
+
+For "kpatch load" invocations, don't set failing return status if the
+kpatch module is already loaded and enabled.  Make note of the existing
+livepatch module and then verify that is has completed its transition
+before continuing.  This allows the user to more gracefully re-run
+"kpatch load" commands to pick up new kpatch modules.
+
+Fixes: #979
+Signed-off-by: Joe Lawrence <joe.lawrence@redhat.com>
+---
+ kpatch/kpatch | 44 ++++++++++++++++++++++----------------------
+ 1 file changed, 22 insertions(+), 22 deletions(-)
+
+diff --git a/kpatch/kpatch b/kpatch/kpatch
+index 328f1197259d..8ea6c80ca2d3 100755
+--- a/kpatch/kpatch
++++ b/kpatch/kpatch
+@@ -314,30 +314,30 @@ load_module () {
+ 				die "error: cannot re-enable patch module $modname, cannot verify checksum match"
+ 			fi
+ 		else
+-			die "error: module named $modname already loaded and enabled"
++			echo "module named $modname already loaded and enabled"
+ 		fi
+-	fi
++	else
++		echo "loading patch module: $module"
++		local i=0
++		while true; do
++			out="$(LC_ALL=C insmod "$module" 2>&1)"
++			[[ -z "$out" ]] && break
++			echo "$out" 1>&2
++			[[ ! "$out" =~ "Device or resource busy" ]] &&
++				die "failed to load module $module"
+ 
+-	echo "loading patch module: $module"
+-	local i=0
+-	while true; do
+-		out="$(LC_ALL=C insmod "$module" 2>&1)"
+-		[[ -z "$out" ]] && break
+-		echo "$out" 1>&2
+-		[[ ! "$out" =~ "Device or resource busy" ]] &&
+-			die "failed to load module $module"
+-
+-		# "Device or resource busy" means the activeness safety check
+-		# failed.  Retry in a few seconds.
+-		i=$((i+1))
+-		if [[ $i -eq $MAX_LOAD_ATTEMPTS ]]; then
+-			die "failed to load module $module"
+-			break
+-		else
+-			warn "retrying..."
+-			sleep $RETRY_INTERVAL
+-		fi
+-	done
++			# "Device or resource busy" means the activeness safety check
++			# failed.  Retry in a few seconds.
++			i=$((i+1))
++			if [[ $i -eq $MAX_LOAD_ATTEMPTS ]]; then
++				die "failed to load module $module"
++				break
++			else
++				warn "retrying..."
++				sleep $RETRY_INTERVAL
++			fi
++		done
++	fi
+ 
+ 	if ! wait_for_patch_transition "$modname" ; then
+ 		echo "module $modname did not complete its transition, unloading..."
+-- 
+2.21.0
+
